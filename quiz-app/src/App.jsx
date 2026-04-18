@@ -44,8 +44,15 @@ function parseQuiz(text) {
 
 function parseBlock(block, fallbackNum) {
   if (!block || block.length < 5) return null;
-  // 구분선 라인 제거
-  const rawLines = block.split("\n")
+
+  // 코드블럭을 플레이스홀더로 치환해서 보존
+  const codeBlocks = [];
+  const withPlaceholders = block.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    codeBlocks.push({ lang: lang||"", code: code.trim() });
+    return `__CODE_${codeBlocks.length - 1}__`;
+  });
+
+  const rawLines = withPlaceholders.split("\n")
     .map(l => l.trim())
     .filter(l => l && !/^[━─—\-]{3,}$/.test(l) && !/^\*{3,}$/.test(l));
   if (!rawLines.length) return null;
@@ -60,19 +67,33 @@ function parseBlock(block, fallbackNum) {
   else if ((hm[2]||"").includes("서술") || qText.includes("[서술형]")) type = "essay";
   qText = qText.replace(/\[단답형\]|\[서술형\]/g, "").trim();
 
+  // 코드블럭 플레이스홀더 복원 함수
+  const restore = s => s ? s.replace(/__CODE_(\d+)__/g, (_, i) => {
+    const cb = codeBlocks[parseInt(i)];
+    return cb ? `\`\`\`${cb.lang}\n${cb.code}\n\`\`\`` : "";
+  }) : s;
+
+  qText = restore(qText);
+
   const opts = []; let answer=null, explanation=null, modelAnswer=null;
   let cA=false, cE=false, cM=false;
+  let pendingCode = null; // 보기 다음에 코드블럭이 오는 경우
 
   for (let i = 1; i < rawLines.length; i++) {
     const l = rawLines[i].replace(/\*\*/g,"").trim();
 
-    // 구분선 스킵
     if (/^[━─—\-]{3,}$/.test(l) || /^\*{3,}$/.test(l)) { cA=cE=cM=false; continue; }
+
+    // 코드블럭 플레이스홀더 → 질문 텍스트에 붙이기 (질문 다음 코드는 질문의 일부)
+    if (/^__CODE_\d+__$/.test(l) && !cA && !cE && !cM && opts.length === 0) {
+      qText = qText + "\n" + restore(l);
+      continue;
+    }
 
     const om = l.match(/^([①②③④⑤]|\d+[\.\)])\s+(.+)/);
     if (om && type==="mcq") {
       const mk=om[1], tx=om[2];
-      opts.push({ num:"①②③④⑤".includes(mk)?"①②③④⑤".indexOf(mk)+1:opts.length+1, text:tx });
+      opts.push({ num:"①②③④⑤".includes(mk)?"①②③④⑤".indexOf(mk)+1:opts.length+1, text:restore(tx) });
       cA=cE=cM=false; continue;
     }
     const ansM = l.match(/^정답\s*[:：]?\s*(.+)/);
@@ -81,22 +102,20 @@ function parseBlock(block, fallbackNum) {
       if (type==="mcq") {
         const a = raw.replace(/[^①②③④⑤\d]/g,"").charAt(0);
         answer = "①②③④⑤".includes(a) ? "①②③④⑤".indexOf(a)+1 : parseInt(a)||null;
-      } else { answer=raw; cA=true; }
+      } else { answer=restore(raw); cA=true; }
       cE=cM=false; continue;
     }
     const maM = l.match(/^모범답안\s*[:：]?\s*(.*)/);
-    if (maM) { modelAnswer=maM[1].trim(); cM=true; cA=cE=false; continue; }
+    if (maM) { modelAnswer=restore(maM[1].trim()); cM=true; cA=cE=false; continue; }
     const exM = l.match(/^해설\s*[:：]?\s*(.*)/);
     if (exM) {
       const expText = exM[1].trim();
-      // 해설 내용이 구분선이면 무시
-      if (expText && !/^[━─—\-]{3,}$/.test(expText)) explanation=expText;
+      if (expText && !/^[━─—\-]{3,}$/.test(expText)) explanation=restore(expText);
       cE=true; cA=cM=false; continue;
     }
-    // 이어지는 내용 (구분선 제외)
-    if (cM && modelAnswer!==undefined) { modelAnswer+=" "+l; continue; }
-    if (cA && type!=="mcq") { answer=(answer||"")+" "+l; continue; }
-    if (cE && !/^[━─—\-]{3,}$/.test(l)) { explanation=(explanation||"")+" "+l; continue; }
+    if (cM && modelAnswer!==undefined) { modelAnswer+=" "+restore(l); continue; }
+    if (cA && type!=="mcq") { answer=(answer||"")+" "+restore(l); continue; }
+    if (cE && !/^[━─—\-]{3,}$/.test(l)) { explanation=(explanation||"")+" "+restore(l); continue; }
   }
 
   if (type==="mcq" && opts.length < 2) return null;
@@ -261,6 +280,36 @@ textarea:focus,input[type=text]:focus{outline:none;border-color:${G.borderHov}}
 `;
 
 // ── 해설 박스 ─────────────────────────────────────────────────
+
+function RichText({ text, className, style }) {
+  if (!text) return null;
+  const CODE_RE = /(```[\w]*\n?[\s\S]*?```)/g;
+  const parts = text.split(CODE_RE);
+  return (
+    <div className={className} style={style}>
+      {parts.map((part, i) => {
+        const m = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
+        if (m) {
+          const lang = m[1], code = m[2].trim();
+          return (
+            <pre key={i} style={{
+              background:'#1e1e2e', color:'#cdd6f4', borderRadius:8,
+              padding:'12px 16px', fontSize:13, overflowX:'auto',
+              fontFamily:"'SF Mono','Fira Code',monospace",
+              lineHeight:1.65, margin:'12px 0', whiteSpace:'pre',
+              border:'1px solid #313244'
+            }}>
+              {lang && <div style={{fontSize:11,color:'#6c7086',marginBottom:8,textTransform:'uppercase',letterSpacing:'0.06em'}}>{lang}</div>}
+              <code>{code}</code>
+            </pre>
+          );
+        }
+        return part ? <span key={i} style={{whiteSpace:'pre-wrap'}}>{part}</span> : null;
+      })}
+    </div>
+  );
+}
+
 function ExpBox({ cls, title, answer, modelAnswer, explanation }) {
   if (!answer && !modelAnswer && !explanation) return null;
   return (
@@ -304,7 +353,7 @@ function QuizItem({ q, qi, submitted, userMcq, userText, onMcq, onText, onSubmit
         {done && q.type==="essay" &&
           <span className="badge" style={{background:G.blueBg,color:G.blue}}>채점됨</span>}
       </div>
-      <div className="qtext">{q.question}</div>
+      <RichText className="qtext" text={q.question} />
 
       {q.type==="mcq" && (
         <div className="opts">
@@ -745,7 +794,7 @@ export default function App() {
                           </span>
                           <span className="badge ng">오답</span>
                         </div>
-                        <div className="qtext" style={{fontSize:15}}>{q.question}</div>
+                        <RichText className="qtext" style={{fontSize:15}} text={q.question} />
                         <ExpBox cls="miss" title="정답/해설"
                           answer={q.type==="mcq"&&q.answer?`${"①②③④⑤"[q.answer-1]} ${q.options[q.answer-1]?.text}`:q.type!=="essay"?q.answer:null}
                           modelAnswer={q.modelAnswer} explanation={q.explanation}/>
